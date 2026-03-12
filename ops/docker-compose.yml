@@ -1,0 +1,99 @@
+version: "3.9"
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL data warehouse
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-intellistore}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-intellistore}
+      POSTGRES_DB: ${POSTGRES_DB:-intellistore}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # NOTE: These SQL files run only on FIRST initialisation (when the
+      # postgres_data volume is empty).  If you change the schema, remove the
+      # volume first:  docker compose down -v
+      - ./warehouse/schema:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-intellistore}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # API service (FastAPI)
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-intellistore}:${POSTGRES_PASSWORD:-intellistore}@postgres:5432/${POSTGRES_DB:-intellistore}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-60}
+      ETL_SERVICE_URL: http://etl:8001
+      UPLOADS_DIR: /data/uploads
+      CORS_ORIGINS: http://localhost:5173,http://localhost:80
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploads_data:/data/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # ETL service (Python worker)
+  # ---------------------------------------------------------------------------
+  etl:
+    build:
+      context: ./services/etl
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-intellistore}:${POSTGRES_PASSWORD:-intellistore}@postgres:5432/${POSTGRES_DB:-intellistore}
+      UPLOADS_DIR: /data/uploads
+    ports:
+      - "8001:8001"
+    volumes:
+      - uploads_data:/data/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Frontend (React/Vite dev server OR nginx production build)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+      VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+    ports:
+      - "80:80"
+
+volumes:
+  postgres_data:
+  uploads_data:
